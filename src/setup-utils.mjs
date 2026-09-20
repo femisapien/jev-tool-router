@@ -1,0 +1,216 @@
+export const DEFAULT_CODEX_EXCLUDES = new Set([
+  'node_repl',
+  'cua_repl',
+  'codex_app',
+  'jev_router',
+]);
+
+const SENSITIVE_ARG_PATTERN =
+  /(token|api[-_]?key|secret|password|passwd|bearer|authorization)(=|:)/i;
+const SENSITIVE_FLAG_PATTERN =
+  /^--?(token|api[-_]?key|secret|password|passwd|bearer|authorization)$/i;
+
+function containsSensitiveArgs(args) {
+  return (args ?? []).some(
+    (arg) =>
+      SENSITIVE_ARG_PATTERN.test(String(arg)) ||
+      SENSITIVE_FLAG_PATTERN.test(String(arg)) ||
+      /:\/\/[^/@\s]+:[^/@\s]+@/.test(String(arg)),
+  );
+}
+
+function containsSensitiveUrl(url) {
+  const value = String(url);
+  return (
+    SENSITIVE_ARG_PATTERN.test(value) ||
+    /:\/\/[^/@\s]+:[^/@\s]+@/.test(value)
+  );
+}
+
+export function convertCodexMcpDefinition(name, definition) {
+  void name;
+
+  if (definition.enabled === false) {
+    return {
+      definition: null,
+      reason: 'server is disabled in Codex and should remain direct',
+    };
+  }
+
+  if (definition.required === true) {
+    return {
+      definition: null,
+      reason:
+        'server is required in Codex; automatic migration would weaken startup-failure semantics',
+    };
+  }
+
+  if (definition.auth != null) {
+    return {
+      definition: null,
+      reason:
+        'server has explicit Codex auth semantics; automatic migration is intentionally skipped',
+    };
+  }
+
+  if (
+    definition.default_tools_approval_mode != null ||
+    definition.tools != null
+  ) {
+    return {
+      definition: null,
+      reason:
+        'server has explicit approval/output policy overrides; automatic migration is intentionally skipped',
+    };
+  }
+
+  if (
+    definition.experimental_environment != null &&
+    definition.experimental_environment !== 'local'
+  ) {
+    return {
+      definition: null,
+      reason:
+        'server uses a non-local experimental execution environment; automatic migration is skipped',
+    };
+  }
+
+  if (definition.command) {
+    if (
+      definition.env &&
+      Object.keys(definition.env).length > 0
+    ) {
+      return {
+        definition: null,
+        reason:
+          'stdio server contains literal env values; automatic migration is intentionally skipped to avoid copying credentials',
+      };
+    }
+
+    const envVars = definition.env_vars ?? [];
+    if (envVars.some((entry) => typeof entry !== 'string')) {
+      return {
+        definition: null,
+        reason:
+          'stdio server uses structured env_vars entries; automatic migration is intentionally skipped',
+      };
+    }
+
+    if (containsSensitiveArgs(definition.args)) {
+      return {
+        definition: null,
+        reason:
+          'stdio args appear to contain embedded credentials; automatic migration is intentionally skipped',
+      };
+    }
+
+    return {
+      definition: {
+        command: definition.command,
+        args: definition.args ?? [],
+        cwd: definition.cwd,
+        envVars,
+        connectTimeoutMs:
+          typeof definition.startup_timeout_ms === 'number'
+            ? definition.startup_timeout_ms
+            : typeof definition.startup_timeout_sec === 'number'
+              ? definition.startup_timeout_sec * 1000
+              : undefined,
+        toolTimeoutMs:
+          typeof definition.tool_timeout_sec === 'number'
+            ? definition.tool_timeout_sec * 1000
+            : undefined,
+        enabledTools: definition.enabled_tools ?? undefined,
+        disabledTools: definition.disabled_tools ?? undefined,
+      },
+      reason: null,
+    };
+  }
+
+  if (definition.url) {
+    if (
+      definition.bearer_token_env_var ||
+      definition.http_headers ||
+      definition.env_http_headers ||
+      definition.http_headers_helper ||
+      definition.scopes ||
+      definition.oauth_resource ||
+      definition.oauth
+    ) {
+      return {
+        definition: null,
+        reason:
+          'remote server uses explicit auth/header/OAuth configuration; automatic migration is intentionally skipped',
+      };
+    }
+
+    if (containsSensitiveUrl(definition.url)) {
+      return {
+        definition: null,
+        reason:
+          'remote URL appears to contain embedded credentials; automatic migration is intentionally skipped',
+      };
+    }
+
+    return {
+      definition: {
+        command: 'npx',
+        args: ['-y', 'mcp-remote@0.14.2', definition.url],
+        connectTimeoutMs:
+          typeof definition.startup_timeout_ms === 'number'
+            ? definition.startup_timeout_ms
+            : typeof definition.startup_timeout_sec === 'number'
+              ? definition.startup_timeout_sec * 1000
+              : undefined,
+        toolTimeoutMs:
+          typeof definition.tool_timeout_sec === 'number'
+            ? definition.tool_timeout_sec * 1000
+            : undefined,
+        enabledTools: definition.enabled_tools ?? undefined,
+        disabledTools: definition.disabled_tools ?? undefined,
+      },
+      reason: null,
+    };
+  }
+
+  return {
+    definition: null,
+    reason: 'unsupported MCP definition shape',
+  };
+}
+
+export function mergeRouterServers(existingServers, newServers) {
+  return {
+    ...(existingServers ?? {}),
+    ...(newServers ?? {}),
+  };
+}
+
+export function registrationMatchesExpected(
+  actual,
+  expected,
+  { caseInsensitive = false } = {},
+) {
+  if (!actual || !expected) return false;
+
+  const normalize = (value) => {
+    const text = String(value);
+    if (!caseInsensitive) return text;
+    return text.replaceAll('/', '\\').toLowerCase();
+  };
+
+  if (normalize(actual.command) !== normalize(expected.command)) {
+    return false;
+  }
+
+  const actualArgs = actual.args ?? [];
+  const expectedArgs = expected.args ?? [];
+  if (actualArgs.length !== expectedArgs.length) {
+    return false;
+  }
+
+  return actualArgs.every(
+    (value, index) =>
+      normalize(value) === normalize(expectedArgs[index]),
+  );
+}

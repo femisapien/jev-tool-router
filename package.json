@@ -1,0 +1,38 @@
+{
+  "name": "jev-tool-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jev-powered MCP tool router for Codex",
+  "main": "src/server.mjs",
+  "scripts": {
+    "check": "node --check src/server.mjs && node --check src/router-core.mjs && node --check scripts/setup-codex.mjs && node --check scripts/smoke-live.mjs && node --check tests/mock-mcp.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "smoke:live": "node scripts/smoke-live.mjs",
+    "setup:codex": "node scripts/setup-codex.mjs",
+    "status": "node scripts/status.mjs",
+    "route": "node scripts/route.mjs"
+  },
+  "keywords": [
+    "jev",
+    "mcp",
+    "codex",
+    "tool-routing",
+    "ai-agents"
+  ],
+  "author": "Jack Barone",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jackbarunz/jev-tool-router.git"
+  },
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ai": "^7.0.107",
+    "smol-toml": "^1.4.2",
+    "zod": "^4.6.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

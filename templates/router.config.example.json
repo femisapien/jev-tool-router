@@ -1,0 +1,19 @@
+{
+  "model": "typesafe-ai/jev",
+  "threshold": 0.9,
+  "maxJevChoices": 200,
+  "descriptionMaxChars": 240,
+  "inventoryTtlMs": 300000,
+  "connectTimeoutMs": 15000,
+  "toolTimeoutMs": 60000,
+  "servers": {
+    "example_stdio": {
+      "command": "npx",
+      "args": ["-y", "some-mcp-server"]
+    },
+    "example_remote_oauth": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.14.2", "https://example.com/mcp"]
+    }
+  }
+}
