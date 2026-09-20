@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'smol-toml';
+import { parseRouterConfig } from '../src/config.mjs';
 import {
   DEFAULT_CODEX_EXCLUDES,
   convertCodexMcpDefinition,
@@ -111,12 +112,12 @@ const skipped = {};
 let existingRouterConfig = null;
 if (existsSync(ROUTER_CONFIG)) {
   try {
-    existingRouterConfig = JSON.parse(
-      readFileSync(ROUTER_CONFIG, 'utf8'),
+    existingRouterConfig = parseRouterConfig(
+      JSON.parse(readFileSync(ROUTER_CONFIG, 'utf8')),
     );
   } catch (error) {
     throw new Error(
-      'Existing router.config.json is not valid JSON: ' +
+      'Existing router.config.json is invalid: ' +
         (error instanceof Error ? error.message : String(error)),
     );
   }

@@ -41,6 +41,10 @@ const routerConfigSchema = z
   })
   .strict();
 
+export function parseRouterConfig(value) {
+  return routerConfigSchema.parse(value);
+}
+
 export async function loadRouterConfig() {
   const configPath = defaultConfigPath();
   let raw;
@@ -58,7 +62,7 @@ export async function loadRouterConfig() {
     throw error;
   }
 
-  const parsed = routerConfigSchema.parse(JSON.parse(raw));
+  const parsed = parseRouterConfig(JSON.parse(raw));
 
   return {
     configPath,

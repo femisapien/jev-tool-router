@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { loadRouterConfig } from '../src/config.mjs';
+import {
+  loadRouterConfig,
+  parseRouterConfig,
+} from '../src/config.mjs';
 
 async function withConfig(config, fn) {
   const tempDir = await mkdtemp(
@@ -78,5 +81,15 @@ test('rejects literal env objects in router config', async () => {
     async () => {
       await assert.rejects(loadRouterConfig());
     },
+  );
+});
+
+test('rejects valid JSON that violates the runtime router schema', () => {
+  assert.throws(() =>
+    parseRouterConfig({
+      threshold: 'not-a-number',
+      legacyField: true,
+      servers: {},
+    }),
   );
 });
