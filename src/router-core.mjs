@@ -510,8 +510,13 @@ export async function routeTool({ request, context = '' }) {
     }));
 
     while (candidates.length > 0) {
+      // Size chunks against a stage label that is at least as long as any
+      // concrete group label used later in this round. Previously round 1
+      // was budgeted as "single-pass" but multi-chunk execution used
+      // "round-1-group-N", which could push a boundary chunk a few bytes
+      // over the configured Jev budget after it had already passed preflight.
       const stagePrefix =
-        round === 1 ? 'single-pass' : 'round-' + round;
+        'round-' + round + '-group-' + candidates.length;
       const chunks = chunkForEvaluation(
         candidates,
         request,
