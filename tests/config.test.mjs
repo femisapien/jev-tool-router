@@ -50,6 +50,9 @@ test('loads a valid router config with defaults', async () => {
       assert.equal(config.configPath, configPath);
       assert.equal(config.threshold, 0.9);
       assert.equal(config.maxJevChoices, 200);
+      assert.equal(config.jevStateQuestionBudgetTokens, 24_000);
+      assert.equal(config.jevTotalBudgetTokens, 48_000);
+      assert.equal(config.jevContextBudgetTokens, 6_000);
       assert.deepEqual(config.servers.demo.envVars, ['TOKEN']);
     },
   );
@@ -89,6 +92,41 @@ test('rejects valid JSON that violates the runtime router schema', () => {
     parseRouterConfig({
       threshold: 'not-a-number',
       legacyField: true,
+      servers: {},
+    }),
+  );
+});
+
+test('rejects a context budget that is not below the Jev state/question budget', () => {
+  assert.throws(() =>
+    parseRouterConfig({
+      jevStateQuestionBudgetTokens: 8_000,
+      jevContextBudgetTokens: 8_000,
+      servers: {},
+    }),
+  );
+});
+
+test('rejects a Jev state/question budget that is not below the total budget', () => {
+  assert.throws(() =>
+    parseRouterConfig({
+      jevStateQuestionBudgetTokens: 24_000,
+      jevTotalBudgetTokens: 20_000,
+      servers: {},
+    }),
+  );
+});
+
+test('keeps configurable Jev budgets below provider hard limits', () => {
+  assert.throws(() =>
+    parseRouterConfig({
+      jevStateQuestionBudgetTokens: 32_000,
+      servers: {},
+    }),
+  );
+  assert.throws(() =>
+    parseRouterConfig({
+      jevTotalBudgetTokens: 64_000,
       servers: {},
     }),
   );

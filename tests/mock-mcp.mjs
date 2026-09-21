@@ -4,7 +4,7 @@ import * as z from 'zod/v4';
 
 const server = new McpServer({
   name: 'jev-router-mock',
-  version: '0.1.0',
+  version: '0.2.0',
 });
 
 server.registerTool(
@@ -111,5 +111,47 @@ server.registerTool(
     };
   },
 );
+
+const extraToolCount = Math.max(
+  0,
+  Number.parseInt(process.env.MOCK_EXTRA_TOOL_COUNT ?? '0', 10) || 0,
+);
+
+for (let index = 0; index < extraToolCount; index += 1) {
+  const suffix = String(index).padStart(3, '0');
+  server.registerTool(
+    'synthetic_unrelated_' + suffix,
+    {
+      description:
+        'Synthetic routing-load utility ' +
+        suffix +
+        '. It is intentionally unrelated to weather, arithmetic, images, and other real capabilities. ' +
+        'This verbose description exists only to exercise token-aware Jev batching in tests. '.repeat(
+          2,
+        ),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        query: z.string().optional(),
+      },
+    },
+    async ({ query }) => ({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            synthetic: true,
+            index,
+            query: query ?? null,
+          }),
+        },
+      ],
+    }),
+  );
+}
 
 await server.connect(new StdioServerTransport());

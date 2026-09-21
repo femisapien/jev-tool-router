@@ -17,6 +17,10 @@ try {
       {
         model: settings.model,
         threshold: settings.threshold,
+        jevStateQuestionBudgetTokens:
+          settings.jevStateQuestionBudgetTokens,
+        jevTotalBudgetTokens: settings.jevTotalBudgetTokens,
+        jevContextBudgetTokens: settings.jevContextBudgetTokens,
         configPath: settings.configPath,
         routedToolCount: inventory.tools.length,
         toolsByServer: counts,

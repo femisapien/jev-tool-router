@@ -6,9 +6,12 @@ import {
 import { experimental_evaluate as evaluate } from 'ai';
 import { loadRouterConfig } from './config.mjs';
 import {
-  chunkCandidates,
+  chunkByConstraints,
   conservativePathConfidence,
+  estimateEvaluationBudgetUsage,
   shouldSelect,
+  tournamentMadeProgress,
+  truncateTextToEstimatedTokens,
 } from './policy.mjs';
 
 const config = await loadRouterConfig();
@@ -17,6 +20,13 @@ const connectingSessions = new Map();
 let inventoryCache = null;
 let inventoryTimestamp = 0;
 let inventoryErrors = {};
+
+const NO_MATCH_DESCRIPTION =
+  'None of these tools directly supports the requested capability. Choose this when the request is unclear, unrelated, or only weakly matched.';
+const ROUTING_INSTRUCTIONS =
+  'Which available tool is the best match for the capability the agent is looking for? Choose none_of_the_above when no tool directly supports the requested action. Do not infer capabilities that are not stated.';
+const NO_ADDITIONAL_CONTEXT =
+  'No additional context supplied. Match only the requested capability.';
 
 function withTimeout(promise, ms, label) {
   let timer;
@@ -96,7 +106,7 @@ async function createServerSession(serverName) {
   const client = new Client(
     {
       name: 'jev-tool-router-' + serverName,
-      version: '0.1.0',
+      version: '0.2.0',
     },
     { capabilities: {} },
   );
@@ -182,6 +192,10 @@ export function getRouterSettings() {
     threshold: config.threshold,
     maxJevChoices: config.maxJevChoices,
     model: config.model,
+    jevStateQuestionBudgetTokens:
+      config.jevStateQuestionBudgetTokens,
+    jevTotalBudgetTokens: config.jevTotalBudgetTokens,
+    jevContextBudgetTokens: config.jevContextBudgetTokens,
     configPath: config.configPath,
   };
 }
@@ -259,11 +273,15 @@ export async function getToolSchema(server, name) {
   return tool;
 }
 
-async function chooseFrom(candidates, request, context, stage) {
+function buildEvaluationPayload(
+  candidates,
+  request,
+  context,
+  stage,
+) {
   const idToCandidate = new Map();
   const criteria = {
-    none_of_the_above:
-      'None of these tools directly supports the requested capability. Choose this when the request is unclear, unrelated, or only weakly matched.',
+    none_of_the_above: NO_MATCH_DESCRIPTION,
   };
 
   candidates.forEach((candidate, index) => {
@@ -278,23 +296,137 @@ async function chooseFrom(candidates, request, context, stage) {
       tool.description.slice(0, config.descriptionMaxChars);
   });
 
+  const state = {
+    agentRequest: request,
+    context: context || NO_ADDITIONAL_CONTEXT,
+    routingStage: stage,
+  };
+  const questions = {
+    bestTool: {
+      type: 'choice',
+      instructions: ROUTING_INSTRUCTIONS,
+      criteria,
+    },
+  };
+  const estimatedBudgetUsage = estimateEvaluationBudgetUsage(
+    state,
+    questions,
+  );
+
+  return {
+    idToCandidate,
+    state,
+    questions,
+    estimatedTotalTokens: estimatedBudgetUsage.totalTokens,
+    estimatedStateQuestionTokens:
+      estimatedBudgetUsage.stateQuestionTokens,
+  };
+}
+
+function prepareRoutingContext(context) {
+  return truncateTextToEstimatedTokens(
+    context || '',
+    config.jevContextBudgetTokens,
+  );
+}
+
+function chunkForEvaluation(
+  candidates,
+  request,
+  context,
+  stage,
+) {
+  return chunkByConstraints(candidates, {
+    maxItems: config.maxJevChoices,
+    fits: (group) =>
+      payloadFitsJevBudget(
+        buildEvaluationPayload(
+          group,
+          request,
+          context,
+          stage,
+        ),
+      ),
+  });
+}
+
+function payloadFitsJevBudget(payload) {
+  return (
+    payload.estimatedStateQuestionTokens <=
+      config.jevStateQuestionBudgetTokens &&
+    payload.estimatedTotalTokens <= config.jevTotalBudgetTokens
+  );
+}
+
+function createRoutingUsage(contextInfo) {
+  return {
+    jevCalls: 0,
+    callsWithReportedUsage: 0,
+    reportedInputTokens: 0,
+    maxReportedInputTokensPerCall: 0,
+    maxEstimatedTotalTokensPerCall: 0,
+    maxEstimatedStateQuestionTokensPerCall: 0,
+    stateQuestionBudgetTokens:
+      config.jevStateQuestionBudgetTokens,
+    totalBudgetTokens: config.jevTotalBudgetTokens,
+    contextBudgetTokens: config.jevContextBudgetTokens,
+    contextTruncated: contextInfo.truncated,
+    originalContextEstimatedTokens:
+      contextInfo.originalEstimatedTokens,
+    usedContextEstimatedTokens:
+      contextInfo.usedEstimatedTokens,
+  };
+}
+
+function recordRoutingUsage(routingUsage, choice) {
+  routingUsage.jevCalls += 1;
+  routingUsage.maxEstimatedTotalTokensPerCall = Math.max(
+    routingUsage.maxEstimatedTotalTokensPerCall,
+    choice.estimatedTotalTokens ?? 0,
+  );
+  routingUsage.maxEstimatedStateQuestionTokensPerCall = Math.max(
+    routingUsage.maxEstimatedStateQuestionTokensPerCall,
+    choice.estimatedStateQuestionTokens ?? 0,
+  );
+
+  if (
+    typeof choice.inputTokens === 'number' &&
+    Number.isFinite(choice.inputTokens)
+  ) {
+    routingUsage.callsWithReportedUsage += 1;
+    routingUsage.reportedInputTokens += choice.inputTokens;
+    routingUsage.maxReportedInputTokensPerCall = Math.max(
+      routingUsage.maxReportedInputTokensPerCall,
+      choice.inputTokens,
+    );
+  }
+}
+
+async function chooseFrom(candidates, request, context, stage) {
+  const payload = buildEvaluationPayload(
+    candidates,
+    request,
+    context,
+    stage,
+  );
+  if (!payloadFitsJevBudget(payload)) {
+    throw new Error(
+      'Estimated Jev evaluation size exceeds the configured routing budget (state + longest question: ' +
+        payload.estimatedStateQuestionTokens +
+        '/' +
+        config.jevStateQuestionBudgetTokens +
+        ', total request: ' +
+        payload.estimatedTotalTokens +
+        '/' +
+        config.jevTotalBudgetTokens +
+        ' tokens).',
+    );
+  }
+
   const result = await evaluate({
     model: config.model,
-    state: {
-      agentRequest: request,
-      context:
-        context ||
-        'No additional context supplied. Match only the requested capability.',
-      routingStage: stage,
-    },
-    questions: {
-      bestTool: {
-        type: 'choice',
-        instructions:
-          'Which available tool is the best match for the capability the agent is looking for? Choose none_of_the_above when no tool directly supports the requested action. Do not infer capabilities that are not stated.',
-        criteria,
-      },
-    },
+    state: payload.state,
+    questions: payload.questions,
   });
 
   const answer = result.answers.bestTool;
@@ -305,10 +437,15 @@ async function chooseFrom(candidates, request, context, stage) {
       rejectedProbability:
         answer.probabilities?.none_of_the_above ?? 1,
       model: result.response.modelId,
+      inputTokens: result.usage.inputTokens,
+      estimatedTotalTokens: payload.estimatedTotalTokens,
+      estimatedStateQuestionTokens:
+        payload.estimatedStateQuestionTokens,
     };
   }
 
-  const selected = idToCandidate.get(answer.choice) ?? null;
+  const selected =
+    payload.idToCandidate.get(answer.choice) ?? null;
   const probability =
     answer.probabilities?.[answer.choice] ??
     result.providerMetadata?.typesafe?.confidence?.bestTool ??
@@ -320,6 +457,10 @@ async function chooseFrom(candidates, request, context, stage) {
     rejectedProbability:
       answer.probabilities?.none_of_the_above ?? 0,
     model: result.response.modelId,
+    inputTokens: result.usage.inputTokens,
+    estimatedTotalTokens: payload.estimatedTotalTokens,
+    estimatedStateQuestionTokens:
+      payload.estimatedStateQuestionTokens,
   };
 }
 
@@ -343,78 +484,116 @@ export async function routeTool({ request, context = '' }) {
   let model = config.model;
   let routingStrategy = 'single-pass';
   let stageConfidences = [];
+  const contextInfo = prepareRoutingContext(context);
+  const routingContext = contextInfo.text;
+  const routingUsage = createRoutingUsage(contextInfo);
 
   try {
-    if (tools.length <= config.maxJevChoices) {
-      const choice = await chooseFrom(
-        tools,
+    const preflight = buildEvaluationPayload(
+      [],
+      request,
+      routingContext,
+      'preflight',
+    );
+    if (!payloadFitsJevBudget(preflight)) {
+      throw new Error(
+        'The routing request itself exceeds the configured Jev evaluation budget even after optional context trimming.',
+      );
+    }
+
+    let round = 1;
+    let candidates = tools.map((tool) => ({
+      tool,
+      pathConfidence: null,
+      stageConfidences: [],
+      model: config.model,
+    }));
+
+    while (candidates.length > 0) {
+      const stagePrefix =
+        round === 1 ? 'single-pass' : 'round-' + round;
+      const chunks = chunkForEvaluation(
+        candidates,
         request,
-        context,
-        'single-pass',
-      );
-      selected = choice.selected;
-      selectedProbability = choice.probability;
-      model = choice.model;
-      stageConfidences = [choice.probability];
-    } else {
-      routingStrategy = 'tournament';
-      const chunks = chunkCandidates(
-        tools,
-        config.maxJevChoices,
+        routingContext,
+        stagePrefix,
       );
 
-      const firstRound = await Promise.all(
-        chunks.map(async (chunk, index) => {
-          const choice = await chooseFrom(
-            chunk,
-            request,
-            context,
-            'round-1-group-' + (index + 1),
-          );
-          return {
-            tool: choice.selected,
-            pathConfidence: choice.probability,
-            stageConfidence: choice.probability,
-            model: choice.model,
-          };
-        }),
-      );
+      if (round === 1 && chunks.length > 1) {
+        routingStrategy = 'tournament';
+      }
 
-      const finalists = firstRound.filter((entry) => entry.tool);
-      if (finalists.length === 0) {
+      const winners = (
+        await Promise.all(
+          chunks.map(async (chunk, index) => {
+            const stage =
+              chunks.length === 1 && round === 1
+                ? 'single-pass'
+                : 'round-' +
+                  round +
+                  '-group-' +
+                  (index + 1);
+            const choice = await chooseFrom(
+              chunk,
+              request,
+              routingContext,
+              stage,
+            );
+            recordRoutingUsage(routingUsage, choice);
+
+            if (!choice.selected) {
+              return null;
+            }
+
+            const previous = choice.selected.pathConfidence;
+            return {
+              ...choice.selected,
+              pathConfidence:
+                previous == null
+                  ? choice.probability
+                  : conservativePathConfidence(
+                      previous,
+                      choice.probability,
+                    ),
+              stageConfidences: [
+                ...(choice.selected.stageConfidences ?? []),
+                choice.probability,
+              ],
+              model: choice.model,
+            };
+          }),
+        )
+      ).filter(Boolean);
+
+      if (winners.length === 0) {
         selected = null;
         selectedProbability = 0;
-        stageConfidences = firstRound.map(
-          (entry) => entry.stageConfidence,
-        );
-      } else if (finalists.length === 1) {
-        selected = finalists[0].tool;
-        selectedProbability = finalists[0].pathConfidence;
-        model = finalists[0].model;
-        stageConfidences = [finalists[0].stageConfidence];
-      } else {
-        const finalChoice = await chooseFrom(
-          finalists,
-          request,
-          context,
-          'final-round',
-        );
-        const winningFinalist = finalChoice.selected;
-        selected = winningFinalist?.tool ?? null;
-        selectedProbability = winningFinalist
-          ? conservativePathConfidence(
-              winningFinalist.pathConfidence,
-              finalChoice.probability,
-            )
-          : 0;
-        model = finalChoice.model;
-        stageConfidences = winningFinalist
-          ? [
-              winningFinalist.stageConfidence,
-              finalChoice.probability,
-            ]
-          : [finalChoice.probability];
+        stageConfidences = [];
+        break;
       }
+
+      if (winners.length === 1) {
+        selected = winners[0].tool;
+        selectedProbability = winners[0].pathConfidence ?? 0;
+        model = winners[0].model;
+        stageConfidences = winners[0].stageConfidences;
+        break;
+      }
+
+      if (
+        !tournamentMadeProgress(
+          candidates.length,
+          winners.length,
+        )
+      ) {
+        throw new Error(
+          'Token-aware tournament could not reduce the candidate set within the configured Jev budget. Falling back to full discovery instead of exceeding the context limit.',
+        );
+      }
+
+      routingStrategy = 'tournament';
+      candidates = winners;
+      round += 1;
     }
   } catch (error) {
     return {
@@ -425,6 +604,7 @@ export async function routeTool({ request, context = '' }) {
       confidence: 0,
       threshold: config.threshold,
       routingStrategy,
+      routingUsage,
       tools: tools.map(compactTool),
       unavailableServers: inventory.errors,
     };
@@ -440,6 +620,7 @@ export async function routeTool({ request, context = '' }) {
       threshold: config.threshold,
       routingStrategy,
       stageConfidences,
+      routingUsage,
       tool: selected,
       model,
     };
@@ -458,6 +639,7 @@ export async function routeTool({ request, context = '' }) {
     threshold: config.threshold,
     routingStrategy,
     stageConfidences,
+    routingUsage,
     bestCandidate: selected ? compactTool(selected) : null,
     tools: tools.map(compactTool),
     unavailableServers: inventory.errors,

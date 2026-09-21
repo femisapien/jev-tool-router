@@ -69,9 +69,43 @@ Every routing choice includes none_of_the_above. A tool is selected only when
 its probability reaches the configured threshold. Otherwise the router returns
 the normal full routed-tool list.
 
-If the inventory is larger than Jev's Choice option limit, the router runs a
-conservative tournament. Each group produces a finalist, finalists are compared
-again, and final confidence is the minimum confidence along the winning path.
+If the inventory cannot fit safely in one Jev call because of either Choice
+cardinality or context size, the router runs a conservative tournament. Batches
+are constrained by both limits. Each group produces a finalist, finalists are
+compared again, and final confidence is the minimum confidence along the winning
+path.
+
+## Jev context budgeting
+
+Jev 1.13 documents two separate limits:
+
+- 64k tokens for the whole request
+- 32k tokens for `state` plus the single longest question
+
+See https://docs.typesafe.ai/models.
+
+The router does not wait for the provider to reject an oversized request.
+Before every Jev routing call it estimates the serialized input size and builds
+candidate batches that fit conservative working budgets:
+
+- 24k estimated tokens for `state + longest question`
+- 48k estimated tokens for the whole request
+- 6k estimated tokens for optional agent-supplied routing context
+
+The optional context is truncated when necessary and the response reports that
+in `routingUsage.contextTruncated`. The required capability request itself is
+not silently truncated; if it cannot fit safely, routing falls back to the full
+tool list.
+
+The preflight deliberately treats every serialized UTF-8 byte as one estimated
+token. This is intentionally pessimistic because TypeSafe does not publish a
+tokenizer or a safe bytes-per-token lower bound. Live provider usage from AI
+SDK's `result.usage.inputTokens` is returned separately in compact
+`routingUsage` diagnostics for measurement, but it is never used to weaken
+the hard preflight.
+
+`maxJevChoices` remains a hard upper bound per Choice call. The effective batch
+size can be smaller when tool names/descriptions or task context are larger.
 
 ## Requirements
 
@@ -255,6 +289,14 @@ Main options:
 - maxJevChoices: defaults to 200; must remain at most 254 because the router
   reserves one Choice option for none_of_the_above
 - descriptionMaxChars: tool-description characters passed to Jev
+- jevStateQuestionBudgetTokens: defaults to 24000; conservative working budget
+  below Jev 1.13's documented 32k `state + longest question` limit; config is
+  capped at 28000 to preserve headroom
+- jevTotalBudgetTokens: defaults to 48000; conservative working budget below
+  Jev 1.13's documented 64k total request limit; config is capped at 56000 to
+  preserve headroom
+- jevContextBudgetTokens: defaults to 6000; maximum estimated optional task
+  context sent into routing before truncation
 - inventoryTtlMs: cached MCP inventory lifetime
 - connectTimeoutMs: default downstream MCP connection timeout
 - toolTimeoutMs: default downstream tool-call timeout

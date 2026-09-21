@@ -13,11 +13,13 @@ and descriptions before exposing the selected tool's full input schema.
 
 1. The agent describes the external capability it needs.
 2. find_tool sends the request plus routed tool names and descriptions to Jev.
-3. If the winning probability is at least the configured threshold, default
+3. Before each Jev call, constrain optional context and candidate batches to
+   conservative token budgets derived from Jev's documented request limits.
+4. If the winning probability is at least the configured threshold, default
    0.90, return only that tool and its full input schema.
-4. Otherwise return the full routed-tool list.
-5. If execution fails, return fallbackRequired=true and the full list.
-6. If execution succeeds but the tool was semantically wrong, use
+5. Otherwise return the full routed-tool list.
+6. If execution fails, return fallbackRequired=true and the full list.
+7. If execution succeeds but the tool was semantically wrong, use
    list_all_tools.
 
 ## Safety invariants
@@ -53,6 +55,18 @@ and descriptions before exposing the selected tool's full input schema.
 - Jev Choice supports at most 255 options. This router reserves one choice for
   none_of_the_above and uses conservative tournament routing for larger
   inventories.
+- Jev 1.13 documents 64k tokens per request and 32k for state plus the longest
+  question. Default working budgets are 48k total and 24k for state + longest
+  question, leaving explicit headroom below the provider limits.
+- Optional routing context is capped at an estimated 6k tokens by default.
+  Context truncation is surfaced in routingUsage; the required capability
+  request is never silently truncated.
+- Candidate groups are sized by both the Choice option limit and the estimated
+  serialized Jev payload size. Large inventories can therefore use multiple
+  tournament rounds rather than assuming a fixed 200-tool batch always fits.
+- Estimate preflight size pessimistically at one token per serialized UTF-8
+  byte. Provider-reported usage is observability only and must never be used to
+  relax the preflight budget.
 - Tournament confidence is the minimum confidence along the winning path.
 - Every routing choice includes none_of_the_above to avoid forced-choice false
   positives.

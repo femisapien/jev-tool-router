@@ -12,6 +12,7 @@ import {
   refreshInventory,
   routeTool,
 } from './router-core.mjs';
+import { estimateEvaluationBudgetUsage } from './policy.mjs';
 
 if (!process.env.AI_GATEWAY_API_KEY) {
   throw new Error('AI_GATEWAY_API_KEY is required for the Jev tool router.');
@@ -21,7 +22,7 @@ const settings = getRouterSettings();
 
 const server = new McpServer({
   name: 'jev-tool-router',
-  version: '0.1.0',
+  version: '0.2.0',
 });
 
 server.registerTool(
@@ -231,55 +232,92 @@ server.registerTool(
     },
   },
   async ({ goal, requirements, work, evidence }) => {
+    const state = {
+      goal,
+      requirements:
+        requirements || 'No additional explicit requirements supplied.',
+      work,
+      evidence:
+        evidence || 'No additional verification evidence supplied.',
+    };
+    const questions = {
+      satisfiesRequirements: {
+        type: 'boolean',
+        instructions:
+          'What is the probability that the work satisfies the stated goal and explicit requirements?',
+      },
+      complete: {
+        type: 'boolean',
+        instructions:
+          'What is the probability that the requested work is actually complete?',
+      },
+      needsRevision: {
+        type: 'boolean',
+        instructions:
+          'What is the probability that the work needs a meaningful revision before it should be considered finished?',
+      },
+      quality: {
+        type: 'score',
+        instructions:
+          'Rate overall execution quality considering correctness, robustness, polish, and fit to the stated goal.',
+        criteria: [
+          'Unacceptable',
+          'Weak',
+          'Acceptable',
+          'Strong',
+          'Excellent',
+        ],
+      },
+      primaryIssue: {
+        type: 'choice',
+        instructions:
+          'Identify the single most important issue category. Choose none only if no material issue is evident.',
+        criteria: {
+          requirements_mismatch: 'Does not match the brief or constraints.',
+          correctness: 'Technically or factually incorrect.',
+          incomplete: 'Requested work is missing or unfinished.',
+          quality: 'Works but execution quality is the main weakness.',
+          none: 'No material problem is evident.',
+        },
+      },
+    };
+    const estimatedBudgetUsage = estimateEvaluationBudgetUsage(
+      state,
+      questions,
+    );
+
+    if (
+      estimatedBudgetUsage.stateQuestionTokens >
+        settings.jevStateQuestionBudgetTokens ||
+      estimatedBudgetUsage.totalTokens >
+        settings.jevTotalBudgetTokens
+    ) {
+      const oversized = {
+        ok: false,
+        error:
+          'Evaluation input exceeds the configured Jev context budget. Shorten or summarize the work/evidence before evaluating it.',
+        estimatedStateQuestionTokens:
+          estimatedBudgetUsage.stateQuestionTokens,
+        stateQuestionBudgetTokens:
+          settings.jevStateQuestionBudgetTokens,
+        estimatedTotalTokens: estimatedBudgetUsage.totalTokens,
+        totalBudgetTokens: settings.jevTotalBudgetTokens,
+      };
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(oversized, null, 2),
+          },
+        ],
+        structuredContent: oversized,
+      };
+    }
+
     const result = await evaluate({
       model: settings.model,
-      state: {
-        goal,
-        requirements: requirements || 'No additional explicit requirements supplied.',
-        work,
-        evidence: evidence || 'No additional verification evidence supplied.',
-      },
-      questions: {
-        satisfiesRequirements: {
-          type: 'boolean',
-          instructions:
-            'What is the probability that the work satisfies the stated goal and explicit requirements?',
-        },
-        complete: {
-          type: 'boolean',
-          instructions:
-            'What is the probability that the requested work is actually complete?',
-        },
-        needsRevision: {
-          type: 'boolean',
-          instructions:
-            'What is the probability that the work needs a meaningful revision before it should be considered finished?',
-        },
-        quality: {
-          type: 'score',
-          instructions:
-            'Rate overall execution quality considering correctness, robustness, polish, and fit to the stated goal.',
-          criteria: [
-            'Unacceptable',
-            'Weak',
-            'Acceptable',
-            'Strong',
-            'Excellent',
-          ],
-        },
-        primaryIssue: {
-          type: 'choice',
-          instructions:
-            'Identify the single most important issue category. Choose none only if no material issue is evident.',
-          criteria: {
-            requirements_mismatch: 'Does not match the brief or constraints.',
-            correctness: 'Technically or factually incorrect.',
-            incomplete: 'Requested work is missing or unfinished.',
-            quality: 'Works but execution quality is the main weakness.',
-            none: 'No material problem is evident.',
-          },
-        },
-      },
+      state,
+      questions,
     });
 
     const summary = {
@@ -291,6 +329,7 @@ server.registerTool(
       qualityScaleMax: 4,
       primaryIssue: result.answers.primaryIssue.choice,
       model: result.response.modelId,
+      inputTokens: result.usage.inputTokens,
     };
 
     return {
@@ -304,7 +343,7 @@ server.registerTool(
   'router_status',
   {
     description:
-      'Read-only health check for the Jev router, routed server inventory, threshold, and unavailable MCP servers.',
+      'Read-only health check for the Jev router, routed server inventory, confidence threshold, Jev context budgets, and unavailable MCP servers.',
     annotations: {
       title: 'Jev router status',
       readOnlyHint: true,
@@ -321,6 +360,10 @@ server.registerTool(
     const result = {
       threshold: settings.threshold,
       model: settings.model,
+      jevStateQuestionBudgetTokens:
+        settings.jevStateQuestionBudgetTokens,
+      jevTotalBudgetTokens: settings.jevTotalBudgetTokens,
+      jevContextBudgetTokens: settings.jevContextBudgetTokens,
       routedToolCount: inventory.tools.length,
       routedServers: [...new Set(inventory.tools.map((tool) => tool.server))],
       unavailableServers: inventory.errors,

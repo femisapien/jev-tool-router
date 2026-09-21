@@ -34,12 +34,50 @@ const routerConfigSchema = z
     threshold: z.number().min(0).max(1).default(0.9),
     maxJevChoices: z.number().int().min(2).max(254).default(200),
     descriptionMaxChars: z.number().int().positive().default(240),
+    jevStateQuestionBudgetTokens: z
+      .number()
+      .int()
+      .min(4_000)
+      .max(28_000)
+      .default(24_000),
+    jevTotalBudgetTokens: z
+      .number()
+      .int()
+      .min(8_000)
+      .max(56_000)
+      .default(48_000),
+    jevContextBudgetTokens: z
+      .number()
+      .int()
+      .min(0)
+      .max(16_000)
+      .default(6_000),
     inventoryTtlMs: z.number().positive().default(300_000),
     connectTimeoutMs: z.number().positive().default(15_000),
     toolTimeoutMs: z.number().positive().default(60_000),
     servers: z.record(z.string().min(1), serverSchema).default({}),
   })
-  .strict();
+  .strict()
+  .refine(
+    (config) =>
+      config.jevContextBudgetTokens <
+      config.jevStateQuestionBudgetTokens,
+    {
+      message:
+        'jevContextBudgetTokens must be lower than jevStateQuestionBudgetTokens.',
+      path: ['jevContextBudgetTokens'],
+    },
+  )
+  .refine(
+    (config) =>
+      config.jevStateQuestionBudgetTokens <
+      config.jevTotalBudgetTokens,
+    {
+      message:
+        'jevStateQuestionBudgetTokens must be lower than jevTotalBudgetTokens.',
+      path: ['jevTotalBudgetTokens'],
+    },
+  );
 
 export function parseRouterConfig(value) {
   return routerConfigSchema.parse(value);
