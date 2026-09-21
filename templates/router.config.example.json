@@ -3,6 +3,7 @@
   "threshold": 0.9,
   "maxJevChoices": 200,
   "descriptionMaxChars": 240,
+  "fallbackCandidateLimit": 12,
   "jevStateQuestionBudgetTokens": 24000,
   "jevTotalBudgetTokens": 48000,
   "jevContextBudgetTokens": 6000,

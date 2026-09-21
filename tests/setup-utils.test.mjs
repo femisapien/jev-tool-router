@@ -4,6 +4,7 @@ import {
   convertCodexMcpDefinition,
   mergeRouterServers,
   registrationMatchesExpected,
+  upsertManagedMarkdownSection,
 } from '../src/setup-utils.mjs';
 
 test('converts stdio Codex MCP definitions and preserves safe policies', () => {
@@ -180,5 +181,112 @@ test('detects stale or mismatched router registrations', () => {
       caseInsensitive: true,
     }),
     false,
+  );
+});
+
+test('upgrades an existing managed routing section without clobbering later headings', () => {
+  const marker = '# Jev external tool routing';
+  const endMarker = '<!-- /jev-tool-router -->';
+  const legacyContent = [
+    marker,
+    '',
+    'Old fallback_full_list instructions.',
+  ].join('\n');
+  const old = [
+    '# User instructions',
+    '',
+    'Keep this.',
+    '',
+    legacyContent,
+    '',
+    'Plain trailing user note that must survive.',
+    '',
+    '# Another user section',
+    '',
+    'Preserve this too.',
+    '',
+  ].join('\n');
+  const content = [
+    marker,
+    '',
+    'Use fallback_shortlist and search_tools.',
+    '',
+    endMarker,
+  ].join('\n');
+
+  const updated = upsertManagedMarkdownSection(old, {
+    marker,
+    endMarker,
+    content,
+    legacyContent,
+  });
+
+  assert.match(updated, /fallback_shortlist/);
+  assert.doesNotMatch(updated, /fallback_full_list/);
+  assert.match(updated, /# Another user section/);
+  assert.match(updated, /Preserve this too\./);
+  assert.match(updated, /Plain trailing user note that must survive\./);
+});
+
+test('managed routing section insertion is idempotent once an end marker exists', () => {
+  const marker = '# Jev external tool routing';
+  const endMarker = '<!-- /jev-tool-router -->';
+  const content = [marker, '', 'Current instructions.', '', endMarker].join(
+    '\n',
+  );
+
+  const once = upsertManagedMarkdownSection('', {
+    marker,
+    endMarker,
+    content,
+  });
+  const twice = upsertManagedMarkdownSection(once, {
+    marker,
+    endMarker,
+    content,
+  });
+
+  assert.equal(twice, once);
+});
+
+test('supports multiple exact known legacy block variants', () => {
+  const marker = '# Jev external tool routing';
+  const endMarker = '<!-- /jev-tool-router -->';
+  const legacyA = [marker, '', 'Legacy A.'].join('\n');
+  const legacyB = [marker, '', 'Legacy B.'].join('\n');
+  const content = [marker, '', 'Current.', '', endMarker].join('\n');
+  const existing = [legacyB, '', 'KEEP_AFTER'].join('\n');
+
+  const updated = upsertManagedMarkdownSection(existing, {
+    marker,
+    endMarker,
+    content,
+    legacyContent: [legacyA, legacyB],
+  });
+
+  assert.match(updated, /Current\./);
+  assert.match(updated, /KEEP_AFTER/);
+  assert.doesNotMatch(updated, /Legacy B\./);
+});
+
+test('refuses to guess the boundary of an unknown legacy section', () => {
+  const marker = '# Jev external tool routing';
+  const endMarker = '<!-- /jev-tool-router -->';
+  const content = [marker, '', 'Current instructions.', '', endMarker].join(
+    '\n',
+  );
+
+  assert.throws(
+    () =>
+      upsertManagedMarkdownSection(
+        [marker, '', 'User-modified unknown content.'].join('\n'),
+        {
+          marker,
+          endMarker,
+          content,
+          legacyContent: [marker, '', 'Known legacy content.'].join('\n'),
+        },
+      ),
+    /Refusing to rewrite AGENTS\.md automatically/,
   );
 });

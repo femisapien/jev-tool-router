@@ -6,6 +6,7 @@ import {
   conservativePathConfidence,
   estimateEvaluationBudgetUsage,
   estimateSerializedTokens,
+  rankToolsByQuery,
   shouldSelect,
   tournamentMadeProgress,
   truncateTextToEstimatedTokens,
@@ -27,6 +28,75 @@ test('uses the minimum confidence across a tournament path', () => {
 test('gates selected tools at the configured threshold', () => {
   assert.equal(shouldSelect(0.9, 0.9), true);
   assert.equal(shouldSelect(0.899, 0.9), false);
+});
+
+test('ranks an exact tool-name match first', () => {
+  const ranked = rankToolsByQuery(
+    [
+      {
+        server: 'vercel',
+        name: 'get_deployment_logs',
+        description: 'Read deployment runtime logs.',
+      },
+      {
+        server: 'vercel',
+        name: 'list_deployments',
+        description: 'List project deployments.',
+      },
+      {
+        server: 'blender',
+        name: 'get_scene_info',
+        description: 'Inspect a Blender scene.',
+      },
+    ],
+    'get deployment logs',
+    { limit: 3 },
+  );
+
+  assert.equal(ranked.results[0].tool.name, 'get_deployment_logs');
+});
+
+test('uses descriptions and simple plural normalization for lexical search', () => {
+  const ranked = rankToolsByQuery(
+    [
+      {
+        server: 'higgsfield_api',
+        name: 'job_status',
+        description: 'Check the status of a generated video job.',
+      },
+      {
+        server: 'vercel',
+        name: 'get_project',
+        description: 'Read project metadata.',
+      },
+    ],
+    'check generated video jobs',
+    { limit: 2 },
+  );
+
+  assert.equal(ranked.results[0].tool.name, 'job_status');
+});
+
+test('supports server-filtered ranking without leaking other servers', () => {
+  const ranked = rankToolsByQuery(
+    [
+      {
+        server: 'apify',
+        name: 'search_actors',
+        description: 'Search actors in the Apify store.',
+      },
+      {
+        server: 'vercel',
+        name: 'search_projects',
+        description: 'Search Vercel projects.',
+      },
+    ],
+    'search projects',
+    { server: 'vercel', limit: 5 },
+  );
+
+  assert.equal(ranked.results.length, 1);
+  assert.equal(ranked.results[0].tool.server, 'vercel');
 });
 
 test('estimates serialized token usage conservatively from UTF-8 bytes', () => {

@@ -16,6 +16,7 @@ import {
   convertCodexMcpDefinition,
   mergeRouterServers,
   registrationMatchesExpected,
+  upsertManagedMarkdownSection,
 } from '../src/setup-utils.mjs';
 
 const REPO_ROOT = path.resolve(
@@ -182,13 +183,6 @@ console.log(
       : '(none)'),
 );
 
-if (!apply) {
-  console.log('');
-  console.log('Preview only. To apply:');
-  console.log('  npm run setup:codex -- --apply');
-  process.exit(0);
-}
-
 const mergedServers = mergeRouterServers(
   existingServers,
   selected,
@@ -198,6 +192,78 @@ if (Object.keys(mergedServers).length === 0) {
   throw new Error(
     'No MCP servers are routed or eligible for migration.',
   );
+}
+
+// Validate the managed AGENTS.md section before any apply-side mutation. If an
+// older install has user-modified/ambiguous content after our marker, fail
+// closed before writing config or removing any direct MCP registration.
+const marker = '# Jev external tool routing';
+const endMarker = '<!-- /jev-tool-router -->';
+const legacyRoutingInstructions = [
+  marker,
+  '',
+  'For external MCP capabilities, use `jev_router/find_tool` first instead of enumerating or guessing an external tool. Pass the capability you need in plain language and only task context that helps disambiguate it.',
+  '',
+  'If `find_tool` returns `mode: selected`, use the returned schema. Prefer `jev_router/call_readonly_tool` when the upstream tool is explicitly read-only; use `jev_router/call_tool` for mutating or unclassified tools.',
+  '',
+  'If `find_tool` returns `mode: fallback_full_list`, use the full list already returned. If a routed call returns `fallbackRequired: true`, use the returned `allTools` list. If a selected tool succeeds technically but is semantically wrong, call `jev_router/list_all_tools`.',
+  '',
+  'Use `jev_router/get_tool_schema` after full-list discovery when needed.',
+  '',
+  'When the user asks to evaluate work with Jev, use `jev_router/evaluate_work_with_jev`.',
+  '',
+  'This applies only to external MCPs behind `jev_router`. Built-in Codex/OpenAI tools remain native.',
+].join('\n');
+const installedLegacyRoutingInstructions = [
+  marker,
+  '',
+  'For external MCP capabilities, use `jev_router/find_tool` first instead of enumerating or guessing an external tool. Pass the capability you need in plain language and only the task context that helps disambiguate it.',
+  '',
+  'If `find_tool` returns `mode: selected` with confidence at or above the router threshold, use the returned tool. Prefer `jev_router/call_readonly_tool` when the selected tool is explicitly annotated read-only; use `jev_router/call_tool` for mutating or non-read-only tools. Use `jev_router/get_tool_schema` when you need the full schema after fallback or when the exact routed tool is already known.',
+  '',
+  'If `find_tool` returns `mode: fallback_full_list`, use the full tool list already returned in that response; do not repeat discovery. If a routed call fails and returns `fallbackRequired=true`, use the `allTools` list returned with the failure. If a selected tool succeeds technically but is not the capability you were looking for, call `jev_router/list_all_tools` to search the full inventory. After choosing from a full list, fetch its schema if needed and call it through the router.',
+  '',
+  'When the user says to evaluate the work with Jev, use `jev_router/evaluate_work_with_jev`.',
+  '',
+  'This routing rule applies to external MCPs behind `jev_router`. Built-in Codex tools and OpenAI-provided computer/browser/file tools remain native and should be used normally.',
+].join('\n');
+const routingInstructions = [
+  marker,
+  '',
+  'For external MCP capabilities, use `jev_router/find_tool` first instead of enumerating or guessing an external tool. Pass the capability you need in plain language and only task context that helps disambiguate it.',
+  '',
+  'If `find_tool` returns `mode: selected`, use the returned schema. Prefer `jev_router/call_readonly_tool` when the upstream tool is explicitly read-only; use `jev_router/call_tool` for mutating or unclassified tools.',
+  '',
+  'If `find_tool` returns `mode: fallback_shortlist`, inspect the compact shortlist. If no candidate clearly fits, call `jev_router/search_tools` with a more specific capability query. Use `jev_router/list_servers` and paginated `jev_router/list_tools` to expand discovery without loading the entire inventory.',
+  '',
+  'If a routed call returns `fallbackRequired: true`, inspect its compact shortlist or use `search_tools`. If a selected tool succeeds technically but is semantically wrong, search again rather than jumping directly to the full inventory.',
+  '',
+  'Use `jev_router/list_all_tools` only as an explicit last resort when targeted search and paginated discovery are insufficient. Use `jev_router/get_tool_schema` when a discovered candidate needs its full schema.',
+  '',
+  'When the user asks to evaluate work with Jev, use `jev_router/evaluate_work_with_jev`.',
+  '',
+  'This applies only to external MCPs behind `jev_router`. Built-in Codex/OpenAI tools remain native.',
+  '',
+  endMarker,
+].join('\n');
+const existingAgents = existsSync(CODEX_AGENTS)
+  ? readFileSync(CODEX_AGENTS, 'utf8')
+  : '';
+const updatedAgents = upsertManagedMarkdownSection(existingAgents, {
+  marker,
+  endMarker,
+  content: routingInstructions,
+  legacyContent: [
+    legacyRoutingInstructions,
+    installedLegacyRoutingInstructions,
+  ],
+});
+
+if (!apply) {
+  console.log('');
+  console.log('Preview validation passed. To apply:');
+  console.log('  npm run setup:codex -- --apply');
+  process.exit(0);
 }
 
 mkdirSync(ROUTER_CONFIG_DIR, { recursive: true });
@@ -228,6 +294,7 @@ const routerConfig = {
   threshold: 0.9,
   maxJevChoices: 200,
   descriptionMaxChars: 240,
+  fallbackCandidateLimit: 12,
   jevStateQuestionBudgetTokens: 24000,
   jevTotalBudgetTokens: 48000,
   jevContextBudgetTokens: 6000,
@@ -258,33 +325,10 @@ for (const name of Object.keys(selected)) {
   runCodex(['mcp', 'remove', name]);
 }
 
-const marker = '# Jev external tool routing';
-const routingInstructions = [
-  '',
-  '',
-  marker,
-  '',
-  'For external MCP capabilities, use `jev_router/find_tool` first instead of enumerating or guessing an external tool. Pass the capability you need in plain language and only task context that helps disambiguate it.',
-  '',
-  'If `find_tool` returns `mode: selected`, use the returned schema. Prefer `jev_router/call_readonly_tool` when the upstream tool is explicitly read-only; use `jev_router/call_tool` for mutating or unclassified tools.',
-  '',
-  'If `find_tool` returns `mode: fallback_full_list`, use the full list already returned. If a routed call returns `fallbackRequired: true`, use the returned `allTools` list. If a selected tool succeeds technically but is semantically wrong, call `jev_router/list_all_tools`.',
-  '',
-  'Use `jev_router/get_tool_schema` after full-list discovery when needed.',
-  '',
-  'When the user asks to evaluate work with Jev, use `jev_router/evaluate_work_with_jev`.',
-  '',
-  'This applies only to external MCPs behind `jev_router`. Built-in Codex/OpenAI tools remain native.',
-  '',
-].join('\n');
-
-const existingAgents = existsSync(CODEX_AGENTS)
-  ? readFileSync(CODEX_AGENTS, 'utf8')
-  : '';
-if (!existingAgents.includes(marker)) {
+if (updatedAgents !== existingAgents) {
   writeFileSync(
     CODEX_AGENTS,
-    existingAgents.trimEnd() + routingInstructions,
+    updatedAgents,
     'utf8',
   );
 }

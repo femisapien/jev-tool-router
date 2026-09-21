@@ -214,3 +214,65 @@ export function registrationMatchesExpected(
       normalize(value) === normalize(expectedArgs[index]),
   );
 }
+
+export function upsertManagedMarkdownSection(
+  existing,
+  {
+    marker,
+    endMarker,
+    content,
+    legacyContent = null,
+  },
+) {
+  const text = String(existing ?? '');
+  const block = String(content ?? '').trim();
+  if (!marker || !endMarker || !block) {
+    throw new Error(
+      'marker, endMarker, and content are required for a managed markdown section.',
+    );
+  }
+
+  const start = text.indexOf(marker);
+  if (start < 0) {
+    return [text.trimEnd(), block]
+      .filter(Boolean)
+      .join('\n\n')
+      .concat('\n');
+  }
+
+  const explicitEnd = text.indexOf(
+    endMarker,
+    start + marker.length,
+  );
+  let end;
+  if (explicitEnd >= 0) {
+    end = explicitEnd + endMarker.length;
+  } else if (legacyContent) {
+    const legacyBlocks = (Array.isArray(legacyContent)
+      ? legacyContent
+      : [legacyContent]
+    )
+      .map((value) => String(value).trim())
+      .filter(Boolean);
+    const legacyBlock = legacyBlocks.find((block) =>
+      text.slice(start).startsWith(block),
+    );
+    if (!legacyBlock) {
+      throw new Error(
+        'Existing managed-section marker does not match the known legacy block. Refusing to rewrite AGENTS.md automatically.',
+      );
+    }
+    end = start + legacyBlock.length;
+  } else {
+    throw new Error(
+      'Existing managed-section marker has no end marker. Refusing to guess where the section ends.',
+    );
+  }
+
+  const prefix = text.slice(0, start).trimEnd();
+  const suffix = text.slice(end).trimStart();
+  return [prefix, block, suffix]
+    .filter(Boolean)
+    .join('\n\n')
+    .concat('\n');
+}

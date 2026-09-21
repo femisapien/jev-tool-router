@@ -22,18 +22,19 @@ The core flow is:
                   |
           +-------+-------+
           |               |
-      >= threshold     < threshold
+      >= threshold     uncertain/error
           |               |
           v               v
-    one tool + schema   full tool list
-          |
-          v
-       call tool
-          |
-    failure or mismatch
-          |
-          v
-      full discovery
+    one tool + schema  compact shortlist
+          |               |
+          v               v
+       call tool      targeted search
+                          |
+                          v
+                    paginated expand
+                          |
+                          v
+                  full list only last
 
 Default selection threshold: 0.90.
 
@@ -45,6 +46,9 @@ tool discovery behind a small router:
 
 - find_tool
 - get_tool_schema
+- search_tools
+- list_servers
+- list_tools
 - list_all_tools
 - call_readonly_tool
 - call_tool
@@ -67,7 +71,10 @@ It does not receive every full input schema during routing.
 
 Every routing choice includes none_of_the_above. A tool is selected only when
 its probability reaches the configured threshold. Otherwise the router returns
-the normal full routed-tool list.
+a bounded lexical/BM25 shortlist. The agent can refine with search_tools,
+inspect paginated server counts with list_servers, or expand one bounded page
+at a time with list_tools. list_all_tools remains available only as an explicit last
+resort.
 
 If the inventory cannot fit safely in one Jev call because of either Choice
 cardinality or context size, the router runs a conservative tournament. Batches
@@ -94,8 +101,9 @@ candidate batches that fit conservative working budgets:
 
 The optional context is truncated when necessary and the response reports that
 in `routingUsage.contextTruncated`. The required capability request itself is
-not silently truncated; if it cannot fit safely, routing falls back to the full
-tool list.
+not silently truncated; if it cannot fit safely, routing falls back to the same
+bounded shortlist/search path rather than automatically exposing the full
+inventory.
 
 The preflight deliberately treats every serialized UTF-8 byte as one estimated
 token. This is intentionally pessimistic because TypeSafe does not publish a
@@ -222,7 +230,8 @@ For an intentionally vague request:
     I need some external tool, but I do not know which capability.
 
 The winning probability may remain below 0.90, so find_tool returns
-fallback_full_list with the complete routed inventory.
+fallback_shortlist with a bounded ranked candidate set plus guidance for
+search_tools/list_tools.
 
 ## Failure behavior
 
@@ -230,14 +239,19 @@ Technical failure:
 
     call_tool
       -> fallbackRequired: true
-      -> allTools: [...]
+      -> shortlist: [...]
+      -> search_tools if needed
+
+The compact failure response does not echo arbitrary upstream MCP error bodies.
+Diagnostic strings are bounded/redacted, and server-error summaries are capped.
 
 Semantic mismatch:
 
     selected tool technically succeeds
       -> agent sees it was the wrong capability
-      -> list_all_tools
-      -> choose from full inventory
+      -> search_tools
+      -> list_tools by server if needed
+      -> list_all_tools only as a last resort
 
 This makes the optimization reversible on every turn.
 
@@ -289,6 +303,9 @@ Main options:
 - maxJevChoices: defaults to 200; must remain at most 254 because the router
   reserves one Choice option for none_of_the_above
 - descriptionMaxChars: tool-description characters passed to Jev
+- fallbackCandidateLimit: defaults to 12; number of deterministic ranked
+  candidates returned when Jev is uncertain or routing fails; configurable from
+  4 to 50
 - jevStateQuestionBudgetTokens: defaults to 24000; conservative working budget
   below Jev 1.13's documented 32k `state + longest question` limit; config is
   capped at 28000 to preserve headroom

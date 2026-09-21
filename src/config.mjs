@@ -34,6 +34,12 @@ const routerConfigSchema = z
     threshold: z.number().min(0).max(1).default(0.9),
     maxJevChoices: z.number().int().min(2).max(254).default(200),
     descriptionMaxChars: z.number().int().positive().default(240),
+    fallbackCandidateLimit: z
+      .number()
+      .int()
+      .min(4)
+      .max(50)
+      .default(12),
     jevStateQuestionBudgetTokens: z
       .number()
       .int()

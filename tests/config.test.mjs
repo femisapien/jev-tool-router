@@ -50,6 +50,7 @@ test('loads a valid router config with defaults', async () => {
       assert.equal(config.configPath, configPath);
       assert.equal(config.threshold, 0.9);
       assert.equal(config.maxJevChoices, 200);
+      assert.equal(config.fallbackCandidateLimit, 12);
       assert.equal(config.jevStateQuestionBudgetTokens, 24_000);
       assert.equal(config.jevTotalBudgetTokens, 48_000);
       assert.equal(config.jevContextBudgetTokens, 6_000);
@@ -129,5 +130,27 @@ test('keeps configurable Jev budgets below provider hard limits', () => {
       jevTotalBudgetTokens: 64_000,
       servers: {},
     }),
+  );
+});
+
+test('bounds the compact fallback candidate limit', () => {
+  assert.throws(() =>
+    parseRouterConfig({
+      fallbackCandidateLimit: 3,
+      servers: {},
+    }),
+  );
+  assert.throws(() =>
+    parseRouterConfig({
+      fallbackCandidateLimit: 51,
+      servers: {},
+    }),
+  );
+  assert.equal(
+    parseRouterConfig({
+      fallbackCandidateLimit: 8,
+      servers: {},
+    }).fallbackCandidateLimit,
+    8,
   );
 });

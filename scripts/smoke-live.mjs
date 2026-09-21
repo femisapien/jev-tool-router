@@ -91,7 +91,9 @@ try {
     request:
       'I need an external tool but I cannot describe the capability I need.',
   });
-  assert.equal(vague.mode, 'fallback_full_list');
+  assert.equal(vague.mode, 'fallback_shortlist');
+  assert.ok(vague.shortlist.length <= 12);
+  assert.equal(Object.hasOwn(vague, 'tools'), false);
 
   console.log(
     JSON.stringify(
@@ -110,6 +112,7 @@ try {
           selected.routingUsage.maxEstimatedTotalTokensPerCall,
         readOnlyCallSucceeded: call.ok,
         vagueRequestMode: vague.mode,
+        vagueShortlistCount: vague.shortlist.length,
       },
       null,
       2,

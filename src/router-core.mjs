@@ -9,6 +9,7 @@ import {
   chunkByConstraints,
   conservativePathConfidence,
   estimateEvaluationBudgetUsage,
+  rankToolsByQuery,
   shouldSelect,
   tournamentMadeProgress,
   truncateTextToEstimatedTokens,
@@ -50,6 +51,80 @@ function compactTool(tool) {
     name: tool.name,
     description: tool.description,
   };
+}
+
+function compactRankedTool(entry) {
+  return {
+    ...compactTool(entry.tool),
+    score: Number(entry.score.toFixed(4)),
+  };
+}
+
+const MAX_DIAGNOSTIC_CHARS = 600;
+const MAX_UNAVAILABLE_SERVERS = 20;
+
+function sanitizeDiagnosticText(value) {
+  const text = String(value ?? '')
+    .slice(0, MAX_DIAGNOSTIC_CHARS * 4)
+    .replace(
+      /(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+/giu,
+      '$1[redacted]',
+    )
+    .replace(
+      /((?:api[-_]?key|token|secret|password|passwd|bearer)\s*[:=]\s*)[^\s,;]+/giu,
+      '$1[redacted]',
+    )
+    .replace(/\s+/gu, ' ')
+    .trim();
+
+  if (text.length <= MAX_DIAGNOSTIC_CHARS) return text;
+  return text.slice(0, MAX_DIAGNOSTIC_CHARS) + '…';
+}
+
+export function summarizeUnavailableServers(
+  errors,
+  limit = MAX_UNAVAILABLE_SERVERS,
+) {
+  const entries = Object.entries(errors ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, limit)
+    .map(([server, error]) => ({
+      server,
+      error: sanitizeDiagnosticText(error),
+    }));
+
+  return {
+    count: Object.keys(errors ?? {}).length,
+    shown: entries.length,
+    items: entries,
+  };
+}
+
+function compactUpstreamError(result) {
+  const content = Array.isArray(result?.content) ? result.content : [];
+  return {
+    isError: result?.isError === true,
+    contentItemCount: content.length,
+    contentTypes: [...new Set(content
+      .slice(0, 20)
+      .map((item) => item?.type)
+      .filter(Boolean)
+      .map((type) => String(type).slice(0, 40)))]
+      .slice(0, 10),
+    hasStructuredContent: result?.structuredContent != null,
+  };
+}
+
+function assertKnownServer(server) {
+  if (server && !Object.hasOwn(config.servers, server)) {
+    throw new Error('Unknown routed MCP server: ' + server);
+  }
+}
+
+function validateDiscoveryLimit(limit) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new Error('limit must be an integer between 1 and 50.');
+  }
 }
 
 function buildEnvironment(definition) {
@@ -106,7 +181,7 @@ async function createServerSession(serverName) {
   const client = new Client(
     {
       name: 'jev-tool-router-' + serverName,
-      version: '0.2.0',
+      version: '0.3.0',
     },
     { capabilities: {} },
   );
@@ -191,6 +266,7 @@ export function getRouterSettings() {
   return {
     threshold: config.threshold,
     maxJevChoices: config.maxJevChoices,
+    fallbackCandidateLimit: config.fallbackCandidateLimit,
     model: config.model,
     jevStateQuestionBudgetTokens:
       config.jevStateQuestionBudgetTokens,
@@ -247,7 +323,96 @@ export async function listAllTools({ force = false } = {}) {
   const inventory = await refreshInventory({ force });
   return {
     tools: inventory.tools.map(compactTool),
-    unavailableServers: inventory.errors,
+    unavailableServers: summarizeUnavailableServers(inventory.errors),
+  };
+}
+
+export async function listServers({
+  cursor = 0,
+  limit = 25,
+  force = false,
+} = {}) {
+  validateDiscoveryLimit(limit);
+  if (!Number.isInteger(cursor) || cursor < 0) {
+    throw new Error('cursor must be a non-negative integer.');
+  }
+  const inventory = await refreshInventory({ force });
+  const counts = new Map();
+  for (const tool of inventory.tools) {
+    counts.set(tool.server, (counts.get(tool.server) ?? 0) + 1);
+  }
+
+  const names = Object.keys(config.servers).sort();
+  const end = Math.min(names.length, cursor + limit);
+
+  return {
+    cursor,
+    limit,
+    total: names.length,
+    nextCursor: end < names.length ? end : null,
+    servers: names
+      .slice(cursor, end)
+      .map((name) => ({
+        name,
+        toolCount: counts.get(name) ?? 0,
+        available: inventory.errors[name] == null,
+        ...(inventory.errors[name]
+          ? { error: sanitizeDiagnosticText(inventory.errors[name]) }
+          : {}),
+      })),
+  };
+}
+
+export async function listTools({
+  server = null,
+  cursor = 0,
+  limit = 25,
+  force = false,
+} = {}) {
+  assertKnownServer(server);
+  validateDiscoveryLimit(limit);
+  if (!Number.isInteger(cursor) || cursor < 0) {
+    throw new Error('cursor must be a non-negative integer.');
+  }
+
+  const inventory = await refreshInventory({ force });
+  const filtered = inventory.tools.filter(
+    (tool) => !server || tool.server === server,
+  );
+  const end = Math.min(filtered.length, cursor + limit);
+
+  return {
+    server,
+    cursor,
+    limit,
+    total: filtered.length,
+    nextCursor: end < filtered.length ? end : null,
+    tools: filtered.slice(cursor, end).map(compactTool),
+    unavailableServers: summarizeUnavailableServers(inventory.errors),
+  };
+}
+
+export async function searchTools({
+  query,
+  server = null,
+  limit = config.fallbackCandidateLimit,
+  force = false,
+}) {
+  assertKnownServer(server);
+  validateDiscoveryLimit(limit);
+  const inventory = await refreshInventory({ force });
+  const ranked = rankToolsByQuery(inventory.tools, query, {
+    server,
+    limit,
+  });
+
+  return {
+    server,
+    limit,
+    queryTerms: ranked.queryTerms,
+    totalMatches: ranked.totalMatches,
+    tools: ranked.results.map(compactRankedTool),
+    unavailableServers: summarizeUnavailableServers(inventory.errors),
   };
 }
 
@@ -402,6 +567,89 @@ function recordRoutingUsage(routingUsage, choice) {
   }
 }
 
+function buildRoutingFallback({
+  inventory,
+  request,
+  reason,
+  confidence = 0,
+  routingStrategy = 'single-pass',
+  routingUsage = null,
+  stageConfidences = [],
+  bestCandidate = null,
+  model = config.model,
+}) {
+  const ranked = rankToolsByQuery(inventory.tools, request, {
+    limit: config.fallbackCandidateLimit,
+  });
+  const shortlist = ranked.results.map(compactRankedTool);
+
+  return {
+    mode: 'fallback_shortlist',
+    reason: sanitizeDiagnosticText(reason),
+    confidence,
+    threshold: config.threshold,
+    routingStrategy,
+    ...(routingUsage ? { routingUsage } : {}),
+    ...(stageConfidences.length > 0 ? { stageConfidences } : {}),
+    ...(bestCandidate
+      ? { bestCandidate: compactTool(bestCandidate) }
+      : {}),
+    shortlist,
+    search: {
+      strategy: 'bm25_lexical',
+      limit: config.fallbackCandidateLimit,
+      queryTerms: ranked.queryTerms,
+      totalMatches: ranked.totalMatches,
+    },
+    suggestedNextAction:
+      shortlist.length > 0
+        ? 'Choose from this shortlist if one candidate clearly fits; otherwise call search_tools with a more specific query, then list_tools by server if needed. Use list_all_tools only as a last resort.'
+        : 'No lexical match was strong enough. Call search_tools with a more specific capability query or list_servers/list_tools. Use list_all_tools only as a last resort.',
+    unavailableServers: summarizeUnavailableServers(inventory.errors),
+    model,
+  };
+}
+
+async function buildExecutionFallback({
+  server,
+  name,
+  error,
+  force = false,
+  upstream = null,
+}) {
+  const inventory = await refreshInventory({ force });
+  const failedTool = inventory.tools.find(
+    (tool) => tool.server === server && tool.name === name,
+  );
+  const query = failedTool
+    ? name + ' ' + failedTool.description
+    : name;
+  const ranked = rankToolsByQuery(inventory.tools, query, {
+    limit: config.fallbackCandidateLimit + 1,
+  });
+  const shortlist = ranked.results
+    .filter(
+      (entry) =>
+        entry.tool.server !== server || entry.tool.name !== name,
+    )
+    .slice(0, config.fallbackCandidateLimit)
+    .map(compactRankedTool);
+
+  return {
+    ok: false,
+    fallbackRequired: true,
+    error: sanitizeDiagnosticText(error),
+    failedTool: { server, name },
+    ...(upstream
+      ? { upstreamError: compactUpstreamError(upstream) }
+      : {}),
+    shortlist,
+    suggestedNextAction:
+      'Inspect this compact shortlist or call search_tools with the intended capability. Use list_all_tools only as an explicit last resort.',
+    unavailableServers: summarizeUnavailableServers(inventory.errors),
+  };
+}
+
 async function chooseFrom(candidates, request, context, stage) {
   const payload = buildEvaluationPayload(
     candidates,
@@ -469,14 +717,12 @@ export async function routeTool({ request, context = '' }) {
   const tools = inventory.tools;
 
   if (tools.length === 0) {
-    return {
-      mode: 'fallback_full_list',
+    return buildRoutingFallback({
+      inventory,
+      request,
       reason: 'No routed tools are currently available.',
       confidence: 0,
-      threshold: config.threshold,
-      tools: [],
-      unavailableServers: inventory.errors,
-    };
+    });
   }
 
   let selected;
@@ -592,7 +838,7 @@ export async function routeTool({ request, context = '' }) {
         )
       ) {
         throw new Error(
-          'Token-aware tournament could not reduce the candidate set within the configured Jev budget. Falling back to full discovery instead of exceeding the context limit.',
+          'Token-aware tournament could not reduce the candidate set within the configured Jev budget.',
         );
       }
 
@@ -601,18 +847,16 @@ export async function routeTool({ request, context = '' }) {
       round += 1;
     }
   } catch (error) {
-    return {
-      mode: 'fallback_full_list',
+    return buildRoutingFallback({
+      inventory,
+      request,
       reason:
         'Jev routing failed: ' +
         (error instanceof Error ? error.message : String(error)),
       confidence: 0,
-      threshold: config.threshold,
       routingStrategy,
       routingUsage,
-      tools: tools.map(compactTool),
-      unavailableServers: inventory.errors,
-    };
+    });
   }
 
   if (
@@ -631,8 +875,9 @@ export async function routeTool({ request, context = '' }) {
     };
   }
 
-  return {
-    mode: 'fallback_full_list',
+  return buildRoutingFallback({
+    inventory,
+    request,
     reason: selected
       ? 'Best candidate was below threshold (' +
         selectedProbability.toFixed(2) +
@@ -641,15 +886,12 @@ export async function routeTool({ request, context = '' }) {
         ').'
       : 'Jev selected none_of_the_above.',
     confidence: selectedProbability,
-    threshold: config.threshold,
     routingStrategy,
-    stageConfidences,
     routingUsage,
-    bestCandidate: selected ? compactTool(selected) : null,
-    tools: tools.map(compactTool),
-    unavailableServers: inventory.errors,
+    stageConfidences,
+    bestCandidate: selected,
     model,
-  };
+  });
 }
 
 export async function callRoutedTool({
@@ -671,15 +913,12 @@ export async function callRoutedTool({
     );
 
     if (result.isError) {
-      const fallback = await listAllTools();
-      return {
-        ok: false,
-        fallbackRequired: true,
+      return buildExecutionFallback({
+        server,
+        name,
         error: 'Upstream MCP tool returned isError=true.',
         upstream: result,
-        allTools: fallback.tools,
-        unavailableServers: fallback.unavailableServers,
-      };
+      });
     }
 
     return {
@@ -689,14 +928,12 @@ export async function callRoutedTool({
     };
   } catch (error) {
     await evictSession(server);
-    const fallback = await listAllTools({ force: true });
-    return {
-      ok: false,
-      fallbackRequired: true,
+    return buildExecutionFallback({
+      server,
+      name,
       error: error instanceof Error ? error.message : String(error),
-      allTools: fallback.tools,
-      unavailableServers: fallback.unavailableServers,
-    };
+      force: true,
+    });
   }
 }
 
@@ -721,14 +958,12 @@ export async function callReadOnlyRoutedTool({
 
     return callRoutedTool({ server, name, arguments: args });
   } catch (error) {
-    const fallback = await listAllTools({ force: true });
-    return {
-      ok: false,
-      fallbackRequired: true,
+    return buildExecutionFallback({
+      server,
+      name,
       error: error instanceof Error ? error.message : String(error),
-      allTools: fallback.tools,
-      unavailableServers: fallback.unavailableServers,
-    };
+      force: true,
+    });
   }
 }
 

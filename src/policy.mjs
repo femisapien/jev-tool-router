@@ -15,6 +15,200 @@ export function estimateSerializedTokens(value) {
   return bytes;
 }
 
+function canonicalSearchToken(value) {
+  const token = String(value ?? '').toLowerCase();
+  if (token.length > 4 && token.endsWith('ies')) {
+    return token.slice(0, -3) + 'y';
+  }
+  if (
+    token.length > 3 &&
+    token.endsWith('s') &&
+    !token.endsWith('ss') &&
+    !token.endsWith('us') &&
+    !token.endsWith('is')
+  ) {
+    return token.slice(0, -1);
+  }
+  return token;
+}
+
+export function tokenizeSearchText(value) {
+  const normalized = String(value ?? '')
+    .replace(/([\p{Ll}\p{N}])([\p{Lu}])/gu, '$1 $2')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+
+  if (!normalized) return [];
+  return normalized
+    .split(/\s+/u)
+    .map((token) => canonicalSearchToken(token).slice(0, 80))
+    .filter(Boolean);
+}
+
+function countTerm(tokens, term) {
+  let count = 0;
+  for (const token of tokens) {
+    if (token === term) count += 1;
+  }
+  return count;
+}
+
+function normalizedPhrase(value) {
+  return tokenizeSearchText(value).join(' ');
+}
+
+export function rankToolsByQuery(
+  tools,
+  query,
+  { limit = 12, server = null } = {},
+) {
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error('limit must be a positive integer.');
+  }
+
+  const rawQuery = String(query ?? '');
+  const boundedQuery =
+    rawQuery.length <= 8_000
+      ? rawQuery
+      : rawQuery.slice(0, 4_000) + ' ' + rawQuery.slice(-4_000);
+  const queryTerms = [
+    ...new Set(tokenizeSearchText(boundedQuery)),
+  ].slice(0, 64);
+  if (queryTerms.length === 0) {
+    return {
+      queryTerms,
+      totalMatches: 0,
+      results: [],
+    };
+  }
+
+  const documents = tools
+    .filter((tool) => !server || tool.server === server)
+    .map((tool) => {
+      const nameTokens = tokenizeSearchText(tool.name);
+      const serverTokens = tokenizeSearchText(tool.server);
+      const descriptionTokens = tokenizeSearchText(tool.description);
+      return {
+        tool,
+        nameTokens,
+        serverTokens,
+        descriptionTokens,
+        length:
+          nameTokens.length +
+          serverTokens.length +
+          descriptionTokens.length,
+      };
+    });
+
+  if (documents.length === 0) {
+    return {
+      queryTerms,
+      totalMatches: 0,
+      results: [],
+    };
+  }
+
+  const averageLength =
+    documents.reduce((sum, document) => sum + document.length, 0) /
+    documents.length;
+  const documentFrequency = new Map();
+  for (const term of queryTerms) {
+    const count = documents.filter((document) =>
+      [
+        ...document.nameTokens,
+        ...document.serverTokens,
+        ...document.descriptionTokens,
+      ].includes(term),
+    ).length;
+    documentFrequency.set(term, count);
+  }
+
+  const queryPhrase = normalizedPhrase(boundedQuery).slice(0, 4_000);
+  const k1 = 1.2;
+  const b = 0.75;
+  const scored = documents.map((document) => {
+    let score = 0;
+    let matchedTerms = 0;
+    const lengthNormalization =
+      1 -
+      b +
+      b *
+        (document.length /
+          Math.max(1, averageLength));
+
+    for (const term of queryTerms) {
+      const nameTf = countTerm(document.nameTokens, term);
+      const serverTf = countTerm(document.serverTokens, term);
+      const descriptionTf = countTerm(
+        document.descriptionTokens,
+        term,
+      );
+      const weightedTf =
+        nameTf * 4 +
+        serverTf * 2 +
+        descriptionTf;
+      if (weightedTf === 0) continue;
+
+      matchedTerms += 1;
+      const df = documentFrequency.get(term) ?? 0;
+      const idf = Math.log(
+        1 +
+          (documents.length - df + 0.5) /
+            (df + 0.5),
+      );
+      score +=
+        idf *
+        ((weightedTf * (k1 + 1)) /
+          (weightedTf + k1 * lengthNormalization));
+    }
+
+    const namePhrase = normalizedPhrase(document.tool.name);
+    const serverPhrase = normalizedPhrase(document.tool.server);
+    if (queryPhrase === namePhrase) score += 20;
+    else if (
+      namePhrase &&
+      queryPhrase.includes(namePhrase)
+    ) {
+      score += 8;
+    }
+    if (
+      serverPhrase &&
+      queryPhrase.includes(serverPhrase)
+    ) {
+      score += 2;
+    }
+    if (
+      matchedTerms > 0 &&
+      matchedTerms === queryTerms.length
+    ) {
+      score += 3;
+    }
+
+    return {
+      tool: document.tool,
+      score,
+      matchedTerms,
+    };
+  });
+
+  const matches = scored
+    .filter((entry) => entry.score > 0)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        b.matchedTerms - a.matchedTerms ||
+        a.tool.server.localeCompare(b.tool.server) ||
+        a.tool.name.localeCompare(b.tool.name),
+    );
+
+  return {
+    queryTerms,
+    totalMatches: matches.length,
+    results: matches.slice(0, limit),
+  };
+}
+
 export function estimateEvaluationBudgetUsage(
   state,
   questions,

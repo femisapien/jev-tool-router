@@ -32,7 +32,7 @@ test('enforces tool filters, times out safely, and recovers the downstream sessi
           mock: {
             command: process.execPath,
             args: [path.join(repoRoot, 'tests', 'mock-mcp.mjs')],
-            enabledTools: ['get_weather', 'slow_lookup'],
+            enabledTools: ['get_weather', 'slow_lookup', 'large_error'],
             disabledTools: ['calculate'],
           },
         },
@@ -54,7 +54,7 @@ test('enforces tool filters, times out safely, and recovers the downstream sessi
     const inventory = await router.listAllTools({ force: true });
     assert.deepEqual(
       inventory.tools.map((tool) => tool.name).sort(),
-      ['get_weather', 'slow_lookup'],
+      ['get_weather', 'large_error', 'slow_lookup'],
     );
 
     const slowResult = await router.callReadOnlyRoutedTool({
@@ -65,6 +65,23 @@ test('enforces tool filters, times out safely, and recovers the downstream sessi
     assert.equal(slowResult.ok, false);
     assert.equal(slowResult.fallbackRequired, true);
     assert.match(slowResult.error, /timed out/);
+    assert.equal(Object.hasOwn(slowResult, 'allTools'), false);
+    assert.equal(Object.hasOwn(slowResult, 'upstream'), false);
+    assert.ok(slowResult.shortlist.length <= 12);
+
+    const largeErrorResult = await router.callReadOnlyRoutedTool({
+      server: 'mock',
+      name: 'large_error',
+      arguments: {},
+    });
+    const serializedLargeError = JSON.stringify(largeErrorResult);
+    assert.equal(largeErrorResult.ok, false);
+    assert.equal(largeErrorResult.fallbackRequired, true);
+    assert.equal(Object.hasOwn(largeErrorResult, 'upstream'), false);
+    assert.equal(largeErrorResult.upstreamError.isError, true);
+    assert.equal(largeErrorResult.upstreamError.contentItemCount, 1);
+    assert.doesNotMatch(serializedLargeError, /DO_NOT_ECHO/);
+    assert.ok(serializedLargeError.length < 15_000);
 
     const recovered = await router.callReadOnlyRoutedTool({
       server: 'mock',

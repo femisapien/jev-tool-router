@@ -9,8 +9,12 @@ import {
   getRouterSettings,
   getToolSchema,
   listAllTools,
+  listServers,
+  listTools,
   refreshInventory,
   routeTool,
+  searchTools,
+  summarizeUnavailableServers,
 } from './router-core.mjs';
 import { estimateEvaluationBudgetUsage } from './policy.mjs';
 
@@ -22,14 +26,14 @@ const settings = getRouterSettings();
 
 const server = new McpServer({
   name: 'jev-tool-router',
-  version: '0.2.0',
+  version: '0.3.0',
 });
 
 server.registerTool(
   'find_tool',
   {
     description:
-      'Use this FIRST whenever you need an external MCP capability and do not already have the exact routed tool. Jev compares the agent request against every routed tool name + description. If the winning probability reaches the configured threshold, only that tool and its full input schema are returned. Otherwise the router falls back to the full tool list.',
+      'Use this FIRST whenever you need an external MCP capability and do not already have the exact routed tool. Jev compares the agent request against every routed tool name + description. If the winning probability reaches the configured threshold, only that tool and its full input schema are returned. Otherwise the router returns a compact ranked shortlist and discovery guidance instead of dumping the full inventory.',
     annotations: {
       title: 'Find external tool with Jev',
       readOnlyHint: true,
@@ -61,7 +65,7 @@ server.registerTool(
   'get_tool_schema',
   {
     description:
-      'Get the full input schema for one routed tool after list_all_tools or when the exact tool is already known.',
+      'Get the full input schema for one routed tool after find_tool/search_tools/list_tools or when the exact tool is already known.',
     annotations: {
       title: 'Get routed tool schema',
       readOnlyHint: true,
@@ -84,10 +88,124 @@ server.registerTool(
 );
 
 server.registerTool(
+  'search_tools',
+  {
+    description:
+      'Search routed external tools with a compact deterministic lexical/BM25 ranking. Use this after a fallback_shortlist when the first shortlist is unclear, or whenever you want targeted discovery without exposing the full inventory.',
+    annotations: {
+      title: 'Search routed tools',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      query: z
+        .string()
+        .min(1)
+        .max(4000)
+        .describe('Specific capability or tool name to search for.'),
+      server: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Optional routed MCP server name to restrict the search.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .default(settings.fallbackCandidateLimit),
+      refresh: z.boolean().default(false),
+    },
+  },
+  async ({ query, server: serverName, limit, refresh }) => {
+    const result = await searchTools({
+      query,
+      server: serverName ?? null,
+      limit,
+      force: refresh,
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      structuredContent: result,
+    };
+  },
+);
+
+server.registerTool(
+  'list_servers',
+  {
+    description:
+      'List routed MCP server names in bounded pages with compact tool counts and availability. Use this to narrow discovery before listing tools from one server.',
+    annotations: {
+      title: 'List routed MCP servers',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      cursor: z.number().int().min(0).default(0),
+      limit: z.number().int().min(1).max(50).default(25),
+      refresh: z.boolean().default(false),
+    },
+  },
+  async ({ cursor, limit, refresh }) => {
+    const result = await listServers({
+      cursor,
+      limit,
+      force: refresh,
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      structuredContent: result,
+    };
+  },
+);
+
+server.registerTool(
+  'list_tools',
+  {
+    description:
+      'List routed tools in bounded pages, optionally restricted to one MCP server. Prefer this over list_all_tools when search_tools is insufficient.',
+    annotations: {
+      title: 'List routed tools',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      server: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Optional routed MCP server name.'),
+      cursor: z.number().int().min(0).default(0),
+      limit: z.number().int().min(1).max(50).default(25),
+      refresh: z.boolean().default(false),
+    },
+  },
+  async ({ server: serverName, cursor, limit, refresh }) => {
+    const result = await listTools({
+      server: serverName ?? null,
+      cursor,
+      limit,
+      force: refresh,
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      structuredContent: result,
+    };
+  },
+);
+
+server.registerTool(
   'list_all_tools',
   {
     description:
-      'Full routed-tool discovery fallback. Use when a selected tool was semantically wrong. Low-confidence find_tool responses and failed routed calls already include the full list.',
+      'Explicit last-resort full routed-tool inventory. Prefer find_tool, search_tools, list_servers, and paginated list_tools first. This can be large.',
     annotations: {
       title: 'List all routed tools',
       readOnlyHint: true,
@@ -168,7 +286,7 @@ server.registerTool(
   'call_tool',
   {
     description:
-      'Execute a routed external MCP tool after find_tool/get_tool_schema. If the upstream call fails, this automatically returns fallbackRequired=true together with the full routed tool list. If the call succeeds but the result is semantically wrong for the task, immediately use list_all_tools.',
+      'Execute a routed external MCP tool after find_tool/get_tool_schema. If the upstream call fails, this returns fallbackRequired=true with a compact alternative shortlist and search guidance. If the call succeeds but the result is semantically wrong for the task, use search_tools or list_tools before list_all_tools.',
     annotations: {
       title: 'Call routed external tool',
       readOnlyHint: false,
@@ -357,16 +475,22 @@ server.registerTool(
   },
   async ({ refresh }) => {
     const inventory = await refreshInventory({ force: refresh });
+    const routedServers = [
+      ...new Set(inventory.tools.map((tool) => tool.server)),
+    ].sort();
     const result = {
       threshold: settings.threshold,
       model: settings.model,
+      fallbackCandidateLimit: settings.fallbackCandidateLimit,
       jevStateQuestionBudgetTokens:
         settings.jevStateQuestionBudgetTokens,
       jevTotalBudgetTokens: settings.jevTotalBudgetTokens,
       jevContextBudgetTokens: settings.jevContextBudgetTokens,
       routedToolCount: inventory.tools.length,
-      routedServers: [...new Set(inventory.tools.map((tool) => tool.server))],
-      unavailableServers: inventory.errors,
+      routedServerCount: routedServers.length,
+      routedServers: routedServers.slice(0, 50),
+      routedServersTruncated: routedServers.length > 50,
+      unavailableServers: summarizeUnavailableServers(inventory.errors),
       configPath: settings.configPath,
     };
     return {

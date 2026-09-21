@@ -2,6 +2,7 @@ import {
   closeAllSessions,
   getRouterSettings,
   refreshInventory,
+  summarizeUnavailableServers,
 } from '../src/router-core.mjs';
 
 try {
@@ -17,6 +18,7 @@ try {
       {
         model: settings.model,
         threshold: settings.threshold,
+        fallbackCandidateLimit: settings.fallbackCandidateLimit,
         jevStateQuestionBudgetTokens:
           settings.jevStateQuestionBudgetTokens,
         jevTotalBudgetTokens: settings.jevTotalBudgetTokens,
@@ -24,7 +26,7 @@ try {
         configPath: settings.configPath,
         routedToolCount: inventory.tools.length,
         toolsByServer: counts,
-        unavailableServers: inventory.errors,
+        unavailableServers: summarizeUnavailableServers(inventory.errors),
       },
       null,
       2,

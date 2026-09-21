@@ -1,6 +1,6 @@
 ---
 name: jev-tool-router
-description: Install, configure, or maintain a Jev-powered MCP tool router for Codex. Use when the user wants to reduce external MCP tool-schema context, route tool discovery through TypeSafe AI Jev, hide large MCP inventories behind a small router surface, or add confidence-gated tool selection with full-list fallback.
+description: Install, configure, or maintain a Jev-powered MCP tool router for Codex. Use when the user wants to reduce external MCP tool-schema context, route tool discovery through TypeSafe AI Jev, hide large MCP inventories behind a small router surface, or add confidence-gated tool selection with compact searchable fallback.
 ---
 
 # Jev Tool Router
@@ -17,10 +17,13 @@ and descriptions before exposing the selected tool's full input schema.
    conservative token budgets derived from Jev's documented request limits.
 4. If the winning probability is at least the configured threshold, default
    0.90, return only that tool and its full input schema.
-5. Otherwise return the full routed-tool list.
-6. If execution fails, return fallbackRequired=true and the full list.
-7. If execution succeeds but the tool was semantically wrong, use
-   list_all_tools.
+5. Otherwise return a bounded lexical/BM25 shortlist, default 12 candidates.
+6. If execution fails, return fallbackRequired=true with a compact alternative
+   shortlist and targeted-discovery guidance.
+7. If the shortlist is insufficient, use search_tools, then paginated
+   list_servers and list_tools. Keep list_all_tools as an explicit last resort.
+8. If execution succeeds but the tool was semantically wrong, search again
+   rather than immediately loading the full inventory.
 
 ## Safety invariants
 
@@ -64,6 +67,14 @@ and descriptions before exposing the selected tool's full input schema.
 - Candidate groups are sized by both the Choice option limit and the estimated
   serialized Jev payload size. Large inventories can therefore use multiple
   tournament rounds rather than assuming a fixed 200-tool batch always fits.
+- Low-confidence, none-of-the-above, Jev-error, and downstream-call fallback
+  paths must stay bounded. Never embed the complete routed inventory
+  automatically in those responses.
+- Do not echo arbitrary upstream MCP error bodies in fallback responses. Keep
+  diagnostics bounded/redacted and unavailable-server summaries capped.
+- Deterministic fallback discovery ranks compact tool metadata and defaults to
+  12 candidates. Broader discovery must be explicit through search_tools,
+  list_servers, paginated list_tools, or finally list_all_tools.
 - Estimate preflight size pessimistically at one token per serialized UTF-8
   byte. Provider-reported usage is observability only and must never be used to
   relax the preflight budget.
@@ -120,14 +131,17 @@ For external MCP capabilities:
 - When it returns mode selected, use the returned schema.
 - Prefer jev_router/call_readonly_tool for tools explicitly marked read-only.
 - Use jev_router/call_tool for mutating or unclassified tools.
-- When find_tool returns fallback_full_list, use the full list already present
-  in that response.
-- When a routed call returns fallbackRequired=true, use its returned allTools
-  list.
+- When find_tool returns fallback_shortlist, inspect the bounded candidates.
+- If the shortlist is unclear, call jev_router/search_tools with a more
+  specific capability query.
+- Use jev_router/list_servers and paginated jev_router/list_tools to expand
+  discovery without loading the full inventory.
+- When a routed call returns fallbackRequired=true, inspect its compact
+  shortlist or search again.
 - If the selected tool worked technically but did not satisfy the capability,
-  call jev_router/list_all_tools.
-- Use jev_router/get_tool_schema after full-list discovery when the selected
-  tool's full schema is needed.
+  search again rather than immediately expanding everything.
+- Use jev_router/list_all_tools only as an explicit last resort.
+- Use jev_router/get_tool_schema when a discovered tool's full schema is needed.
 
 When the user asks to evaluate the work with Jev, use
 jev_router/evaluate_work_with_jev.

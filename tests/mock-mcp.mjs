@@ -4,7 +4,7 @@ import * as z from 'zod/v4';
 
 const server = new McpServer({
   name: 'jev-router-mock',
-  version: '0.2.0',
+  version: '0.3.0',
 });
 
 server.registerTool(
@@ -110,6 +110,33 @@ server.registerTool(
       ],
     };
   },
+);
+
+server.registerTool(
+  'large_error',
+  {
+    description:
+      'Return a deliberately oversized upstream error. Used only to verify compact fallback behavior.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    inputSchema: {},
+  },
+  async () => ({
+    isError: true,
+    content: [
+      {
+        type: 'text',
+        text: 'DO_NOT_ECHO_' + 'x'.repeat(100_000),
+      },
+    ],
+    structuredContent: {
+      diagnostic: 'DO_NOT_ECHO_STRUCTURED_' + 'y'.repeat(100_000),
+    },
+  }),
 );
 
 const extraToolCount = Math.max(
